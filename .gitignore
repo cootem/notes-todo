@@ -3,3 +3,5 @@ __pycache__/
 settings.json
 research_cache.json
 .todo-*.tmp
+deploy.sh
+.deployed-commit
