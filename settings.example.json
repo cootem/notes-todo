@@ -1,0 +1,23 @@
+{
+  "app_title": "Markdown To-Do",
+  "root": "",
+  "extensions": [
+    ".md"
+  ],
+  "skip_dirs": [
+    ".git",
+    ".obsidian",
+    "node_modules",
+    ".claude"
+  ],
+  "use_heading_dates": true,
+  "year_from_filename": true,
+  "done_stamp": "m/d",
+  "drop_strikethrough": true,
+  "editor_command": "",
+  "research_enabled": true,
+  "research_model": "sonnet",
+  "research_timeout": 300,
+  "research_tools": [],
+  "research_context": "The current folder is a collection of markdown notes. Search it with Grep/Glob/Read for related notes. Prefer the most recent relevant material."
+}
