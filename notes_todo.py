@@ -1084,9 +1084,11 @@ def desktop_exec(argv: list) -> str:
 
 def login_env_wrap(argv: list) -> list:
     """Swap `python notes_todo.py ARGS` for NotesTodo-desktop.sh ARGS, which loads ~/.bashrc first
-    (ANTHROPIC_API_KEY for the Research button). A script keeps the Exec= line free of quoting."""
+    (ANTHROPIC_API_KEY for the Research button). A script keeps the Exec= line free of quoting.
+    Run through /bin/bash so it works even if a sync tool (e.g. Nextcloud) drops the script's exec bit,
+    which would otherwise make GNOME hide the launcher and fail to start it."""
     here = Path(__file__).resolve().parent
-    return [str(here / "NotesTodo-desktop.sh")] + [str(a) for a in argv[2:]]
+    return ["/bin/bash", str(here / "NotesTodo-desktop.sh")] + [str(a) for a in argv[2:]]
 
 
 def icon_png() -> Path:
@@ -1133,7 +1135,7 @@ def make_shortcut_linux(port: int) -> Path:
         "Path=" + str(here),
         "Icon=" + str(icon_png()),
         "Terminal=false",
-        "Categories=Office;Utility;",
+        "Categories=Office;",
         "StartupNotify=false",
     ]
     app = write_desktop(DESKTOP_APP, lines)

@@ -20,6 +20,8 @@ Settings are saved to `settings.json` next to the script (copy `settings.example
 
 Launchers: `NotesTodo.sh` (Linux/macOS), `NotesTodo.cmd` (Windows). `--make-shortcut` creates a desktop/app-menu
 entry and `--register-protocol` enables the page's Relaunch button.
+On Linux the entry runs `/bin/bash NotesTodo-desktop.sh`, so it keeps working if a sync tool (e.g. Nextcloud)
+strips the scripts' exec bit. Re-run `--make-shortcut` after moving or redeploying the files.
 
 ## Checkbox conventions
 
