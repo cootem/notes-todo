@@ -54,7 +54,7 @@ Out of scope: creating tasks, due dates/reminders, multi-user sync, remote acces
 - F28. A gear button opens a dialog to edit all settings (see README); saving validates, writes `settings.json`, and applies without restart.
 - F29. Invalid values (e.g. missing folder, bad timeout) are rejected with a message and leave the running configuration unchanged.
 - F30. "Reset to defaults" loads built-in defaults into the form; they apply on Save.
-- F31. Precedence for the folder: `--root` > `NOTES_ROOT` > settings value > current directory. The dialog says when an override is active.
+- F31. Precedence for the folder: `--root` > `NOTES_ROOT` > settings value > current directory. The dialog says when an override is active. A relative settings value is resolved from the folder containing `settings.json`; `--root` / `NOTES_ROOT` are resolved from the current directory.
 
 ### 3.7 Command line
 - F32. `--list` prints tasks and exits, with `--status`, `--since`, `--folder` (repeatable), `--grep` and `--format text|md|json`.

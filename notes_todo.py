@@ -37,7 +37,7 @@ IS_WINDOWS = sys.platform == "win32"
 SETTINGS_FILE = Path(__file__).resolve().with_name("settings.json")
 DEFAULT_SETTINGS = {
     "app_title": "Markdown To-Do",
-    "root": "",                         # "" = auto (see DEFAULT_ROOT); --root / NOTES_ROOT override it for one run
+    "root": "",                         # "" = auto (see DEFAULT_ROOT); relative = from this file; --root / NOTES_ROOT override
     "extensions": [".md"],              # file types to scan and edit
     "skip_dirs": [".git", ".obsidian", "node_modules", ".claude"],   # hidden (.x) dirs always skipped
     "use_heading_dates": True,          # take an item's date from the nearest heading containing YYYY-MM-DD
@@ -91,7 +91,11 @@ def clean_settings(raw: dict) -> dict:
 def effective_root(st: dict) -> Path:
     if ROOT_OVERRIDE:
         return Path(ROOT_OVERRIDE).expanduser().resolve()
-    return Path(st["root"]).expanduser().resolve() if st["root"] else DEFAULT_ROOT
+    if not st["root"]:
+        return DEFAULT_ROOT
+    root = Path(st["root"]).expanduser()
+    # A relative path is relative to settings.json, so e.g. "../.." keeps working wherever the folder is mounted
+    return (root if root.is_absolute() else SETTINGS_FILE.parent / root).resolve()
 
 
 def apply_settings(st: dict, check_root: bool = True):
@@ -943,7 +947,7 @@ function readForm(){
 $('#gear').onclick=async()=>{
   try{sdata=await (await fetch('/api/settings')).json()}catch{return toast('Couldn’t load settings',true)}
   fillForm(sdata.settings);$('#smsg').textContent='';
-  $('#rootHint').textContent=sdata.rootOverridden?`Scanning ${sdata.root} — set by --root / NOTES_ROOT for this run, which overrides this field.`:`Scanning ${sdata.root}. Leave empty for the automatic default.`;
+  $('#rootHint').textContent=sdata.rootOverridden?`Scanning ${sdata.root} — set by --root / NOTES_ROOT for this run, which overrides this field.`:`Scanning ${sdata.root}. Leave empty for the automatic default; a relative path is relative to settings.json.`;
   dlg.showModal();
 };
 $('#scancel').onclick=()=>dlg.close();

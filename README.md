@@ -39,7 +39,7 @@ Open with the gear button. Stored in `settings.json`; applied immediately.
 
 | Setting | Purpose |
 |---|---|
-| Folder to scan | Root of the markdown collection (empty = current directory) |
+| Folder to scan | Root of the markdown collection (empty = current directory; a relative path is resolved from the folder holding `settings.json`, e.g. `../..`) |
 | File extensions / skip folders | What to scan; dot-folders are always skipped |
 | App title | Header and tab title |
 | Date options | Use `YYYY-MM-DD` from the nearest heading; cap file date by a year in the file name |
