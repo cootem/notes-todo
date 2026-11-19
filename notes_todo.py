@@ -44,6 +44,7 @@ DEFAULT_SETTINGS = {
     "year_from_filename": True,         # cap a file's modified date at a year found in its name (journal_2023.md)
     "done_stamp": "m/d",                # appended when ticking: "m/d" -> (11/5), "iso" -> (2026-11-05), "none"
     "drop_strikethrough": True,         # dropping writes - [-] ~~text~~ (off: only the [-] marker)
+    "note_on_complete": False,          # open the note box right after ticking an item
     "editor_command": "",               # "" = Typora if found, else the system default; e.g. "code {file}"
     "research_enabled": True,           # show the Research button (needs the Claude Code CLI)
     "research_model": "sonnet",
@@ -196,8 +197,18 @@ def scan_file(path: Path):
         mtime = min(mtime, dt.date(int(ym.group(1)), 12, 31))
     mtime = mtime.isoformat()
     tasks = []
+    by_id = {}
     headings = []          # [(level, text)]
-    stack = []             # [(indent, task_id or None, bullet_text)]
+    stack = []             # [(indent, task_id or None, bullet_text, note dict or None)]
+
+    def note_for(entries, text, line_no):
+        """Record a non-task line as a note of the nearest enclosing task, if any."""
+        k = next((j for j in range(len(entries) - 1, -1, -1) if entries[j][1]), None)
+        if k is None:
+            return None
+        note = {"line": line_no, "text": text, "depth": len(entries) - 1 - k}
+        by_id[entries[k][1]]["notes"].append(note)
+        return note
     in_fence = False
     for i, line in enumerate(lines):
         if FENCE_RE.match(line):
@@ -214,18 +225,26 @@ def scan_file(path: Path):
         t = TASK_RE.match(line)
         b = t or BULLET_RE.match(line)
         if not b:
-            if line.strip() and indent_width(line[: len(line) - len(line.lstrip())]) == 0:
-                stack = []   # a paragraph at column 0 ends the list
+            if line.strip():
+                ind = indent_width(line[: len(line) - len(line.lstrip())])
+                if ind == 0:
+                    stack = []   # a paragraph at column 0 ends the list
+                else:            # an indented paragraph line under a task is part of its notes
+                    note_for([s for s in stack if s[0] < ind], line.strip(), i + 1)
             continue
         ind = indent_width(b["indent"])
         while stack and stack[-1][0] >= ind:
             stack.pop()
         if not t:
-            stack.append((ind, None, b["text"]))
+            stack.append((ind, None, b["text"], note_for(stack, b["text"], i + 1)))
             continue
         tid = f"{rel}:{i + 1}"
         parent_task = next((s[1] for s in reversed(stack) if s[1]), None)
         context = stack[-1][2] if stack and stack[-1][1] is None else None
+        if context is not None and stack[-1][3]:
+            # a plain bullet that groups subtasks is shown as their context, not as a note of the task above
+            notes = by_id[parent_task]["notes"]
+            notes[:] = [n for n in notes if n is not stack[-1][3]]
         heading_path = [x[1] for x in headings]
         date, date_src = None, "file"
         for _, htext in (reversed(headings) if SETTINGS["use_heading_dates"] else ()):
@@ -250,8 +269,10 @@ def scan_file(path: Path):
             "headings": heading_path,
             "date": date or mtime,
             "dateSource": date_src,
+            "notes": [],
         })
-        stack.append((ind, tid, text))
+        by_id[tid] = tasks[-1]
+        stack.append((ind, tid, text, None))
     return tasks
 
 
@@ -328,16 +349,99 @@ def transform(line: str, action: str, today: dt.date) -> str:
     return f"{head}{mark}] {text}"
 
 
+STALE = {"ok": False, "error": "The line changed since the last scan — refreshed. Try again."}
+
+
+def locate(lines, line_no: int, expect: str):
+    """Index of the expected line: at line_no if unchanged, else its unique exact match, else None."""
+    idx = line_no - 1
+    if 0 <= idx < len(lines) and lines[idx] == expect:
+        return idx
+    hits = [k for k, l in enumerate(lines) if l == expect]
+    return hits[0] if len(hits) == 1 else None
+
+
+def leading(line: str) -> str:
+    return line[: len(line) - len(line.lstrip())]
+
+
+def subtree_end(lines, idx: int) -> int:
+    """Index just past the last non-blank line nested under the item at idx (fenced blocks kept whole)."""
+    w = indent_width(leading(lines[idx]))
+    end, fence = idx, False
+    for k in range(idx + 1, len(lines)):
+        l = lines[k]
+        if not fence and l.strip() and indent_width(leading(l)) <= w:
+            break
+        if FENCE_RE.match(l):
+            fence = not fence
+        if l.strip() or fence:
+            end = k
+    return end + 1
+
+
+def child_indent(lines, idx: int, m) -> str:
+    """Indent for a new child bullet: match an existing child, else the file's own nesting step."""
+    w = indent_width(m["indent"])
+    nxt = next((l for l in lines[idx + 1:] if l.strip()), None)
+    if nxt is not None and BULLET_RE.match(nxt) and indent_width(leading(nxt)) > w:
+        return leading(nxt)
+    steps = [leading(l) for l in lines if BULLET_RE.match(l) and leading(l)]
+    if "\t" in m["indent"] or any("\t" in x for x in steps):
+        return m["indent"] + "\t"
+    unit = min((indent_width(x) for x in steps), default=4)
+    return m["indent"] + " " * max(unit, len(m["bullet"]) + 1)
+
+
+def add_note(rel: str, line_no: int, expect: str, text: str):
+    text = re.sub(r"\s*[\r\n]+\s*", " ", str(text)).strip()
+    if not text:
+        raise ValueError("The note is empty")
+    if re.match(r"\[[ xX-]\]\s", text):
+        text = "\\" + text              # keep a note that starts with [ ] from becoming a task
+    path = safe_path(rel)
+    with WRITE_LOCK:
+        lines, eols, bom = read_lines(path)
+        idx = locate(lines, line_no, expect)
+        if idx is None:
+            return STALE
+        m = TASK_RE.match(lines[idx])
+        if not m:
+            raise ValueError("not a task line")
+        pos = subtree_end(lines, idx)
+        new = f"{child_indent(lines, idx, m)}- {text}"
+        eol = max((e for e in eols if e), key=eols.count, default="\n")
+        lines.insert(pos, new)
+        eols.insert(pos, eol)
+        if pos == len(lines) - 1 and eols[pos - 1] == "":     # file had no final newline: keep it that way
+            eols[pos - 1], eols[pos] = eol, ""
+        write_lines(path, lines, eols, bom)
+    return {"ok": True, "line": pos + 1, "raw": new}
+
+
+def remove_note(rel: str, line_no: int, expect: str):
+    path = safe_path(rel)
+    with WRITE_LOCK:
+        lines, eols, bom = read_lines(path)
+        idx = locate(lines, line_no, expect)
+        if idx is None:
+            return STALE
+        if TASK_RE.match(lines[idx]) or not BULLET_RE.match(lines[idx]):
+            raise ValueError("not a note line")
+        if idx == len(lines) - 1 and idx > 0 and eols[idx] == "":
+            eols[idx - 1] = ""
+        del lines[idx], eols[idx]
+        write_lines(path, lines, eols, bom)
+    return {"ok": True}
+
+
 def apply_action(rel: str, line_no: int, expect: str, action: str):
     path = safe_path(rel)
     with WRITE_LOCK:
         lines, eols, bom = read_lines(path)
-        idx = line_no - 1
-        if not (0 <= idx < len(lines) and lines[idx] == expect):
-            hits = [k for k, l in enumerate(lines) if l == expect]
-            if len(hits) != 1:
-                return {"ok": False, "error": "The line changed since the last scan — refreshed. Try again."}
-            idx = hits[0]
+        idx = locate(lines, line_no, expect)
+        if idx is None:
+            return STALE
         new = transform(lines[idx], action, dt.date.today())
         lines[idx] = new
         write_lines(path, lines, eols, bom)
@@ -522,7 +626,8 @@ class Handler(BaseHTTPRequestHandler):
                                                "researchEnabled": SETTINGS["research_enabled"],
                                                "researchTools": bool(SETTINGS["research_tools"]),
                                                "doneStamp": SETTINGS["done_stamp"],
-                                               "dropStrike": SETTINGS["drop_strikethrough"], "tasks": scan_all()}))
+                                               "dropStrike": SETTINGS["drop_strikethrough"],
+                                               "noteOnComplete": SETTINGS["note_on_complete"], "tasks": scan_all()}))
         if route == "/api/settings":
             return self._send(200, json.dumps(settings_payload()))
         if route == "/api/research":
@@ -540,7 +645,13 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             route = urlparse(self.path).path
             if route == "/api/action":
-                res = apply_action(body["file"], int(body["line"]), body["raw"], body["action"])
+                args = (body["file"], int(body["line"]), body["raw"])
+                if body["action"] == "note":
+                    res = add_note(*args, body.get("text", ""))
+                elif body["action"] == "unnote":
+                    res = remove_note(*args)
+                else:
+                    res = apply_action(*args, body["action"])
                 return self._send(200 if res["ok"] else 409, json.dumps(res))
             if route == "/api/settings":
                 st = clean_settings(body.get("settings") or {})
@@ -612,7 +723,7 @@ main{max-width:1100px;margin:0 auto;padding:12px 20px 60px}
 .htitle{color:var(--mute);font-size:12px;margin:6px 0 2px}
 .htitle b{color:var(--fg);font-weight:600}
 .task{display:flex;gap:8px;align-items:flex-start;padding:3px 0}
-.task input{margin-top:3px;flex:none;width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
+.task>input{margin-top:3px;flex:none;width:15px;height:15px;accent-color:var(--accent);cursor:pointer}
 .task .txt{flex:1;overflow-wrap:anywhere}
 .task.done .txt{color:var(--mute)}
 .task.dropped .txt{color:var(--mute)}
@@ -625,6 +736,10 @@ main{max-width:1100px;margin:0 auto;padding:12px 20px 60px}
 .acts button:disabled{visibility:hidden}
 .acts svg{width:15px;height:15px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .age{color:var(--mute);font-size:11.5px;white-space:nowrap;margin-top:2px}
+.tnote{color:var(--mute);font-size:12.5px;border-left:2px solid var(--line);padding-left:8px;margin:2px 0}
+.noteedit{display:flex;gap:6px;margin:4px 0 2px}
+.noteedit input{flex:1;min-width:0;padding:4px 8px;border:1px solid var(--accent);border-radius:6px;background:var(--bg);color:var(--fg);font:inherit;font-size:13px}
+.noteedit button{padding:2px 10px;font-size:12.5px}
 .acts button.has{color:var(--accent)}
 .acts button.busy svg{animation:pulse 1s ease-in-out infinite}
 @keyframes pulse{50%{opacity:.25}}
@@ -649,7 +764,7 @@ a{color:var(--accent)}
 #offstatus{color:var(--mute);font-size:12.5px}
 body.isoff main{opacity:.45;pointer-events:none}
 [hidden]{display:none!important}
-#toast .undo{margin-left:12px;padding:1px 8px;background:transparent;color:inherit;border-color:currentColor}
+#toast button{margin-left:12px;padding:1px 8px;background:transparent;color:inherit;border-color:currentColor}
 #toast.err{background:var(--warn);color:#fff}
 dialog{border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--fg);padding:0;width:min(640px,94vw);max-height:90vh}
 dialog::backdrop{background:rgba(0,0,0,.4)}
@@ -700,6 +815,7 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
     <div class="sf"><label for="s_done_stamp">Completion stamp</label><select id="s_done_stamp"><option value="m/d">(11/5) month/day</option><option value="iso">(2026-11-05) ISO date</option><option value="none">None</option></select><div class="hint">Appended to the item when you tick it.</div></div>
     <h3>Behaviour</h3>
     <div class="sf"><span></span><label class="chk"><input type="checkbox" id="s_drop_strikethrough">Drop also strikes the text through (~~text~~)</label></div>
+    <div class="sf"><span></span><label class="chk"><input type="checkbox" id="s_note_on_complete">Open the note box when you tick an item</label></div>
     <div class="sf"><label for="s_editor_command">Editor command</label><input type="text" id="s_editor_command" placeholder="(Typora if found, else system default)"><div class="hint">Use {file} for the path, e.g. <code>code {file}</code> or <code>obsidian</code>. The file is appended if there is no {file}.</div></div>
     <h3>Research (Claude Code)</h3>
     <div class="sf"><span></span><label class="chk"><input type="checkbox" id="s_research_enabled">Show the Research button (needs the <code>claude</code> CLI)</label></div>
@@ -713,15 +829,16 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
 <div id="offline" hidden><span id="offmsg"></span><button id="relaunch">Relaunch</button><span id="offstatus"></span></div>
 <script>
 const $=s=>document.querySelector(s);
-const state={tasks:[],today:null,folders:{},research:{},panels:new Set(),title:'Notes To-Do',researchEnabled:true,researchTools:false,doneStamp:'m/d',dropStrike:true};
+const state={tasks:[],today:null,folders:{},research:{},panels:new Set(),title:'Notes To-Do',researchEnabled:true,researchTools:false,doneStamp:'m/d',dropStrike:true,noteOnComplete:false,note:null,noteDraft:'',noteFocus:false};
 const store={get(k,d){try{const v=localStorage.getItem('jt.'+k);return v==null?d:JSON.parse(v)}catch{return d}},set(k,v){try{localStorage.setItem('jt.'+k,JSON.stringify(v))}catch{}}};
 for(const id of ['age','sort']){const el=$('#'+id);el.value=store.get(id,el.value);el.onchange=()=>{store.set(id,el.value);render()}}
 for(const id of ['showDone','showDropped']){const el=$('#'+id);el.checked=store.get(id,false);el.onchange=()=>{store.set(id,el.checked);render()}}
 $('#q').oninput=render; $('#refresh').onclick=load;
 addEventListener('focus',load);
-addEventListener('keydown',e=>{if(e.key==='/'&&document.activeElement!==$('#q')){e.preventDefault();$('#q').focus()}});
+addEventListener('keydown',e=>{if(e.key==='/'&&!e.target.matches('input[type=text],input[type=search],input[type=number],textarea')){e.preventDefault();$('#q').focus()}});
 
-function toast(msg,err,undo){const t=$('#toast');t.innerHTML='';t.append(msg);if(undo){const b=document.createElement('button');b.textContent='Undo';b.className='undo';b.onclick=undo;t.append(b)}t.className='show'+(err?' err':'');clearTimeout(t._h);t._h=setTimeout(()=>t.className='',err?4000:undo?8000:1600)}
+function toast(msg,err,undo,extra){const t=$('#toast');t.innerHTML='';t.append(msg);
+  for(const [label,fn] of [extra,undo&&['Undo',undo]].filter(Boolean)){const b=document.createElement('button');b.textContent=label;b.onclick=()=>{t.className='';fn()};t.append(b)}t.className='show'+(err?' err':'');clearTimeout(t._h);t._h=setTimeout(()=>t.className='',err?4000:undo?8000:1600)}
 function esc(s){return s.replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]))}
 function md(s){
   s=esc(s);
@@ -751,7 +868,7 @@ async function load(){
   }catch(e){setOffline(true)}
 }
 function applyMeta(j){
-  state.title=j.title||state.title;state.researchEnabled=j.researchEnabled!==false;state.researchTools=!!j.researchTools;state.doneStamp=j.doneStamp||'m/d';state.dropStrike=j.dropStrike!==false;
+  state.title=j.title||state.title;state.researchEnabled=j.researchEnabled!==false;state.researchTools=!!j.researchTools;state.doneStamp=j.doneStamp||'m/d';state.dropStrike=j.dropStrike!==false;state.noteOnComplete=!!j.noteOnComplete;
   document.title=state.title;$('#title').textContent=state.title;
 }
 // --- offline banner + relaunch via the notestodo:// handler (registered with --register-protocol)
@@ -797,18 +914,20 @@ function renderChips(){
   }
 }
 function visible(t,ignoreFolder){
+  if(state.note===nkey(t))return true;  // keep an item with an open note box on screen (e.g. just ticked)
   if(!ignoreFolder&&!state.folders[t.folder])return false;
   if(t.dropped&&!$('#showDropped').checked)return false;
   if(t.done&&!t.dropped&&!$('#showDone').checked)return false;
   const age=+$('#age').value; if(age&&daysOld(t.date)>age)return false;
   const q=$('#q').value.trim().toLowerCase();
-  if(q){const hay=(t.text+' '+t.file+' '+t.headings.join(' ')+' '+(t.context||'')).toLowerCase();if(!q.split(/\s+/).every(w=>hay.includes(w)))return false}
+  if(q){const hay=(t.text+' '+t.file+' '+t.headings.join(' ')+' '+(t.context||'')+' '+t.notes.map(n=>n.text).join(' ')).toLowerCase();if(!q.split(/\s+/).every(w=>hay.includes(w)))return false}
   return true;
 }
 const collapsed=new Set(store.get('collapsed',[]));
 function toggleCollapsed(key,el){collapsed.has(key)?collapsed.delete(key):collapsed.add(key);el.classList.toggle('collapsed',collapsed.has(key));store.set('collapsed',[...collapsed])}
 $('#colall').onclick=()=>{const keys=[...document.querySelectorAll('.file')].map(f=>f.dataset.key);const all=keys.every(k=>collapsed.has(k));keys.forEach(k=>all?collapsed.delete(k):collapsed.add(k));store.set('collapsed',[...collapsed]);render()};
 function render(){
+  if(document.activeElement&&document.activeElement.classList.contains('noteinp'))state.noteFocus=true;
   renderChips();
   const vis=state.tasks.filter(t=>visible(t));
   const open=vis.filter(t=>!t.done&&!t.dropped).length;
@@ -848,7 +967,8 @@ const ICON={
   drop:'<svg viewBox="0 0 16 16"><rect x="2" y="2" width="12" height="12" rx="2"/><path d="M5 8h6"/></svg>',
   restore:'<svg viewBox="0 0 16 16"><path d="M3 5.5h7a3.5 3.5 0 0 1 0 7H6"/><path d="M5.5 3 3 5.5 5.5 8"/></svg>',
   open:'<svg viewBox="0 0 16 16"><path d="M9 2.5h4.5V7"/><path d="M13.5 2.5 7.5 8.5"/><path d="M12 9.5v3a1 1 0 0 1-1 1H3.5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h3"/></svg>',
-  research:'<svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.4 10.4 14 14"/></svg>'
+  research:'<svg viewBox="0 0 16 16"><circle cx="7" cy="7" r="4.5"/><path d="M10.4 10.4 14 14"/></svg>',
+  note:'<svg viewBox="0 0 16 16"><path d="M2.5 3.5h11v7.5H8l-3.5 2.5V11h-2z"/><path d="M5.5 6.5h5M5.5 8.5h3"/></svg>'
 };
 function taskRow(t){
   const row=document.createElement('div');row.className='task'+(t.done?' done':'')+(t.dropped?' dropped':'');
@@ -856,7 +976,10 @@ function taskRow(t){
   const cb=document.createElement('input');cb.type='checkbox';cb.checked=t.done;cb.disabled=t.dropped;
   cb.title=t.done?'Reopen':state.doneStamp==='none'?'Mark done':'Mark done (adds today’s date)';
   cb.onchange=()=>act(t,t.done?'reopen':'complete');
-  const txt=document.createElement('div');txt.className='txt';const struck=/^~~/.test(t.text),unclosed=t.dropped&&struck&&!/^~~.+?~~/.test(t.text);txt.innerHTML=md(unclosed?t.text.slice(2):t.text);if(unclosed||(t.dropped&&!struck))txt.classList.add('strikeall');
+  const txt=document.createElement('div');txt.className='txt';const struck=/^~~/.test(t.text),unclosed=t.dropped&&struck&&!/^~~.+?~~/.test(t.text);
+  const main=document.createElement('div');main.innerHTML=md(unclosed?t.text.slice(2):t.text);if(unclosed||(t.dropped&&!struck))main.classList.add('strikeall');txt.append(main);
+  for(const n of t.notes){const d=document.createElement('div');d.className='tnote';d.style.marginLeft=(n.depth*14)+'px';d.innerHTML=md(n.text);txt.append(d)}
+  if(state.note===nkey(t))txt.append(noteEditor(t));
   const acts=document.createElement('div');acts.className='acts';
   const drop=document.createElement('button');drop.innerHTML=t.dropped?ICON.restore:ICON.drop;
   drop.title=t.dropped?(unclosed?'Strikethrough spans lines; restore in your editor':'Restore to open'):(t.done?'Done items can’t be dropped':'Drop (out of scope): writes - [-]'+(state.dropStrike?' ~~text~~':''));
@@ -870,9 +993,37 @@ function taskRow(t){
   if(r&&r.status==='running')rs.classList.add('busy');
   rs.title=r&&r.status==='done'?'Show researched background':r&&r.status==='running'?'Researching…':'Research background (Claude Code searches your notes'+(state.researchTools?' and connected tools':'')+')';
   rs.onclick=()=>toggleResearch(t);
-  acts.append(drop,op);if(state.researchEnabled)acts.append(rs);
+  const nb=document.createElement('button');nb.innerHTML=ICON.note;nb.setAttribute('aria-label','Add note');
+  nb.title='Add a note (written as an indented line under the item)';nb.onclick=()=>openNote(t);
+  acts.append(drop,nb,op);if(state.researchEnabled)acts.append(rs);
   const age=document.createElement('span');age.className='age';age.textContent=ageLabel(t);age.title=(t.dateSource==='heading'?'From heading date ':'From file modified date ')+t.date;
   row.append(cb,acts,txt,age);return row;
+}
+// --- notes: an indented "- text" line written under the item
+function nkey(t){return t.file+'|'+t.raw}
+function openNote(t){state.note=nkey(t);state.noteDraft='';state.noteFocus=true;render()}
+function closeNote(){state.note=null;state.noteDraft='';render()}
+function noteEditor(t){
+  const f=document.createElement('form');f.className='noteedit';
+  f.innerHTML='<input type="text" class="noteinp" placeholder="Add a note… (Enter saves, Esc cancels)" aria-label="Note"><button type="submit">Save</button><button type="button">Cancel</button>';
+  const inp=f.querySelector('input');inp.value=state.noteDraft;
+  inp.oninput=()=>{state.noteDraft=inp.value};
+  inp.onkeydown=e=>{if(e.key==='Escape'){e.preventDefault();closeNote()}};
+  f.querySelector('button[type=button]').onclick=closeNote;
+  f.onsubmit=e=>{e.preventDefault();saveNote(t,inp.value)};
+  if(state.noteFocus){state.noteFocus=false;setTimeout(()=>{inp.focus();inp.setSelectionRange(inp.value.length,inp.value.length)})}
+  return f;
+}
+async function saveNote(t,text){
+  if(!text.trim())return closeNote();
+  const [ok,j]=await post('/api/action',{file:t.file,line:t.line,raw:t.raw,action:'note',text});
+  if(!ok){toast(j.error||'Write failed',true);return load()}  // the draft stays open
+  state.note=null;state.noteDraft='';
+  toast('Note added',false,async()=>{
+    const [ok2,j2]=await post('/api/action',{file:t.file,line:j.line,raw:j.raw,action:'unnote'});
+    if(!ok2)toast(j2.error||'Undo failed',true);await load();
+  });
+  await load();
 }
 // --- research: claude -p in the background, result shown in a panel under the row
 function rkey(t){return t.file+'|'+t.text.replace(/[ \t]*\(\d{1,2}\/\d{1,2}(?:\/\d{2,4})?\)$/,'').trim()}
@@ -926,10 +1077,12 @@ async function act(t,action){
   const msgs={complete:'Done ✓',reopen:'Reopened',drop:'Dropped as [-] (hidden unless “Dropped” is ticked)',undrop:'Restored'};
   const inverse={complete:'reopen',reopen:'complete',drop:'undrop',undrop:'drop'};
   const nt={...t,line:j.line,raw:j.raw};
-  toast(msgs[action],false,()=>{$('#toast').className='';act(nt,inverse[action])});await load();
+  const done=action==='complete';
+  if(done&&state.noteOnComplete){state.note=nkey(nt);state.noteDraft='';state.noteFocus=true}
+  toast(msgs[action],false,()=>{if(state.note===nkey(nt))state.note=null;act(nt,inverse[action])},done&&!state.noteOnComplete?['Add note',()=>openNote(nt)]:null);await load();
 }
 // --- settings dialog (gear): edits settings.json on the server; applied live
-const SF={text:['root','app_title','editor_command','research_model','research_context'],num:['research_timeout'],chk:['use_heading_dates','year_from_filename','drop_strikethrough','research_enabled'],sel:['done_stamp'],list:['extensions','skip_dirs','research_tools']};
+const SF={text:['root','app_title','editor_command','research_model','research_context'],num:['research_timeout'],chk:['use_heading_dates','year_from_filename','drop_strikethrough','note_on_complete','research_enabled'],sel:['done_stamp'],list:['extensions','skip_dirs','research_tools']};
 const dlg=$('#settings');let sdata=null;
 function fillForm(st){
   for(const k of SF.text.concat(SF.num,SF.sel))$('#s_'+k).value=st[k]??'';
@@ -984,7 +1137,8 @@ def list_mode(args):
         if args.since and (today - dt.date.fromisoformat(t["date"])).days > args.since:
             return False
         if words:
-            hay = " ".join([t["text"], t["file"], " ".join(t["headings"]), t["context"] or ""]).lower()
+            hay = " ".join([t["text"], t["file"], " ".join(t["headings"]), t["context"] or ""]
+                           + [n["text"] for n in t["notes"]]).lower()
             if not all(w in hay for w in words):
                 return False
         return True
@@ -999,7 +1153,7 @@ def list_mode(args):
                               t["line"]))
 
     if args.format == "json":
-        keys = ("file", "line", "status", "text", "headings", "context", "depth", "date", "dateSource")
+        keys = ("file", "line", "status", "text", "headings", "context", "depth", "date", "dateSource", "notes")
         print(json.dumps({"root": str(ROOT), "today": today.isoformat(), "count": len(tasks),
                           "tasks": [{k: t[k] for k in keys} for t in tasks]}, indent=1, ensure_ascii=False))
         return
@@ -1029,6 +1183,9 @@ def list_mode(args):
             print(f"{pad}- {box[t['status']]} {t['text']}  `L{t['line']}` · {age(t)}{ctx}")
         else:
             print(f"    {pad}L{t['line']:<5} {box[t['status']]} {t['text']}  · {age(t)}{ctx}")
+        for n in t["notes"]:
+            sub = "  " * n["depth"]
+            print(f"  {sub}- {n['text']}" if md else f"    {pad}{'':10}{sub}› {n['text']}")
 
 
 class ExclusiveServer(ThreadingHTTPServer):

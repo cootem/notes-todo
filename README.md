@@ -30,8 +30,12 @@ strips the scripts' exec bit. Re-run `--make-shortcut` after moving or redeployi
 | `- [ ] text` | open |
 | `- [x] text (11/5)` | done, with a completion stamp (`m/d`, ISO date or none; configurable) |
 | `- [-] ~~text~~` | dropped / out of scope (strikethrough optional) |
+| `    - text` under an item | a note on that item, shown beneath it in the app |
 
 Bullets `-`, `*`, `+` and numbered lists are supported, including nested items. Fenced code blocks are ignored.
+
+To add a note without opening the file, click the note button on an item, or "Add note" in the toast after ticking it.
+The note is written as an indented `- text` line after the item and anything already nested under it, and Undo removes it.
 
 ## Settings
 
@@ -45,6 +49,7 @@ Open with the gear button. Stored in `settings.json`; applied immediately.
 | Date options | Use `YYYY-MM-DD` from the nearest heading; cap file date by a year in the file name |
 | Completion stamp | `(m/d)`, `(YYYY-MM-DD)` or none |
 | Drop strikethrough | Whether dropping also writes `~~text~~` |
+| Note on tick | Open the note box automatically when you tick an item |
 | Editor command | e.g. `code {file}`; empty = Typora if found, else system default |
 | Research | Enable, model, timeout, extra read-only tools (e.g. MCP), instructions describing your collection |
 

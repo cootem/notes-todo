@@ -7,7 +7,7 @@ out of the files they live in. The markdown files remain the single source of tr
 
 ## 2. Scope
 
-In scope: scanning, display, filtering, check-off/drop/reopen written back to files, opening files in an editor,
+In scope: scanning, display, filtering, check-off/drop/reopen and notes written back to files, opening files in an editor,
 optional AI "research" of an item, configuration, CLI listing.
 Out of scope: creating tasks, due dates/reminders, multi-user sync, remote access, rich markdown rendering.
 
@@ -19,6 +19,7 @@ Out of scope: creating tasks, due dates/reminders, multi-user sync, remote acces
 - F3. Recognise task lines: bullet (`-`, `*`, `+`, or `1.`/`1)`) + `[ ]`, `[x]`, `[X]` or `[-]`.
 - F4. Ignore content inside fenced code blocks (``` or ~~~).
 - F5. Preserve the heading path (up to six levels), the parent bullet text and nesting depth for each task.
+- F5a. Lines nested under a task that are not tasks (plain bullets, indented paragraph lines) are that task's notes. A plain bullet that has subtasks of its own is shown as their context instead.
 - F6. Tolerate UTF-8 with/without BOM, LF/CRLF line endings, and undecodable bytes (round-trip safe).
 - F7. A legacy item (`[ ]` whose text starts with `~~`) counts as dropped.
 
@@ -39,6 +40,8 @@ Out of scope: creating tasks, due dates/reminders, multi-user sync, remote acces
 - F17. Complete: set `[x]` and append a completion stamp (`m/d`, ISO or none; never duplicated).
 - F18. Reopen: set `[ ]` and remove a trailing stamp.
 - F19. Drop: set `[-]` and, if enabled, wrap the text in `~~`. Restore reverses this. Items whose strikethrough spans multiple lines can't be restored automatically.
+- F19a. Add note: insert `- text` as a child of the task, after the task's last nested line (fenced blocks kept whole), matching the indent of an existing child or else the file's nesting step (tabs if the file uses them). Line breaks are folded to spaces. Undo deletes exactly that line after verifying it.
+- F19b. Notes are shown under their task and included in the text filter and `--list` output. A note box is offered from each row and from the toast after ticking; optionally it opens automatically on tick.
 - F20. Before every write, verify the target line equals the scanned text; if moved, relocate by exact unique match; otherwise refuse, report, and rescan.
 - F21. Writes are atomic (temp file + replace) and serialised; line endings and BOM are preserved.
 - F22. Every change offers an Undo in the toast.
@@ -74,7 +77,7 @@ Out of scope: creating tasks, due dates/reminders, multi-user sync, remote acces
 
 `settings.json` keys and defaults are listed in `settings.example.json`:
 `app_title`, `root`, `extensions`, `skip_dirs`, `use_heading_dates`, `year_from_filename`, `done_stamp`,
-`drop_strikethrough`, `editor_command`, `research_enabled`, `research_model`, `research_timeout`, `research_tools`,
+`drop_strikethrough`, `note_on_complete`, `editor_command`, `research_enabled`, `research_model`, `research_timeout`, `research_tools`,
 `research_context`.
 
 ## 6. HTTP API (internal)
@@ -84,7 +87,7 @@ Out of scope: creating tasks, due dates/reminders, multi-user sync, remote acces
 | `/` | GET | the single-page UI |
 | `/api/tasks` | GET | scan result plus UI metadata |
 | `/api/settings` | GET / POST | read / validate-and-save settings |
-| `/api/action` | POST | complete, reopen, drop, undrop a line |
+| `/api/action` | POST | complete, reopen, drop, undrop a line; add or remove a note |
 | `/api/open` | POST | open a file in the editor |
 | `/api/research` | GET / POST | research results / start a run |
 | `/api/pages`, `/api/bye`, `/api/stop` | GET / POST | page tracking and shutdown |
